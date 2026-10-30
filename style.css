@@ -36,3 +36,7 @@ canvas{width:100%;display:block}
 .tabs a span{display:block;font-size:.7rem}.tabs a.on{color:#0b4f8a;font-weight:700}
 .badge{position:absolute;top:4px;left:55%;background:#d62828;color:#fff;border-radius:10px;font-size:.65rem;padding:1px 6px}
 .toast{position:fixed;bottom:84px;left:50%;transform:translateX(-50%);background:#1b2533;color:#fff;padding:8px 16px;border-radius:20px;font-size:.85rem}
+.sim.live{background:#d8f3dc;color:#1b4332;border-color:#95d5b2}.sim.off{background:#ffe0e0;color:#8a1c1c;border-color:#f5a3a3}
+.btn.green{background:#2b9348;color:#fff}a.btn{text-decoration:none;text-align:center}
+.topic{display:block;background:#f5f8fc;padding:8px;border-radius:8px;font-size:1rem;word-break:break-all;user-select:all}
+.steps{font-size:.85rem;padding-left:20px;margin:6px 0}.steps li{margin:4px 0}

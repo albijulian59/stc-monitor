@@ -142,14 +142,34 @@
         <button class="btn" id="notifBtn">🔔 Aktifkan notifikasi</button>
       </div><p class="hint" id="notifInfo">${notifState()}</p>
       ${pumps.map(p => `<a class="card" href="#/pompa/${p.id}" data-id="${p.id}"><h2>${p.name} <small>›</small></h2><div class="m"></div></a>`).join('')}
-      <p class="hint">Data diperbarui tiap 2,5 detik. Ketuk kartu pompa untuk melihat grafik.</p>`;
-    $('#simBtn').onclick = () => ds.simulateFault();
+      <p class="hint">Data diperbarui otomatis. Ketuk kartu pompa untuk melihat grafik.</p>`;
+    $('#simBtn').onclick = () => simFault();
     $('#notifBtn').onclick = askNotif;
     updateHome();
   }
   function updateHome() {
     pumps.forEach(p => { const el = view.querySelector(`[data-id="${p.id}"] .m`); if (el) el.innerHTML = metrics(ds.getLatest(p.id)); });
   }
+  function simFault(id) {
+    const r = ds.simulateFault(id);
+    if (r && r.remote) toast('Perintah uji dikirim ke perangkat ⏳');
+  }
+
+  /* ---------- Indikator sumber data ---------- */
+  const MODE_TXT = {
+    simulasi: ['⚠️ Mode simulasi — data bukan dari pompa asli', ''],
+    connecting: ['⏳ Menghubungkan ke perangkat… (sementara data simulasi)', ''],
+    live: ['✅ Terhubung ke perangkat — data asli', 'live'],
+    offline: ['❌ Perangkat tidak mengirim data', 'off'],
+    error: ['❌ Gagal memuat koneksi (cek internet) — data simulasi', 'off'],
+  };
+  function updateMode(st, last) {
+    const el = $('#mode'), [t, c] = MODE_TXT[st] || MODE_TXT.simulasi;
+    el.textContent = t + (st === 'offline' && last ? ' sejak ' + fmtTime(last) : '');
+    el.className = 'sim ' + c;
+  }
+  ds.onStatus(updateMode); updateMode(ds.getStatus().status);
+
   function askNotif() {
     if (!('Notification' in window)) return alert('Browser ini tidak mendukung notifikasi.');
     Notification.requestPermission().then(() => { const i = $('#notifInfo'); if (i) i.textContent = notifState();
@@ -164,7 +184,7 @@
       <div class="card"><h3>Arus R / S / T (A) — 10 menit terakhir</h3><canvas id="cA"></canvas>
         <div class="legend"><i style="background:#d62828"></i>R <i style="background:#e0a800"></i>S <i style="background:#1d4ed8"></i>T</div></div>
       <button class="btn red full" id="simOne">🚨 Simulasi alarm pada pompa ini</button>`;
-    $('#simOne').onclick = () => ds.simulateFault(id);
+    $('#simOne').onclick = () => simFault(id);
     updateDetail(id);
   }
   function updateDetail(id) {
@@ -213,13 +233,53 @@
       ${pumps.map(p => { const t = getThresholds(p.id); return `<form class="card set" data-id="${p.id}"><h3>${p.name}</h3>
         ${FIELDS.map(([k, l, st]) => `<label>${l}<input type="number" step="${st}" name="${k}" value="${t[k]}" required></label>`).join('')}
         <div class="row"><button class="btn blue">Simpan</button><button type="button" class="btn reset">Kembalikan default</button></div></form>`; }).join('')}
-      <p class="hint">Mode: ${ds.mode}. Versi tahap 1.</p>`;
+      ${settingConn()}`;
+    bindConn();
     view.querySelectorAll('form.set').forEach(f => {
       const id = f.dataset.id;
       f.onsubmit = e => { e.preventDefault(); settings[id] = {}; FIELDS.forEach(([k]) => settings[id][k] = parseFloat(f.elements[k].value));
         localStorage.setItem('stc.thresholds', JSON.stringify(settings)); toast('Tersimpan ✅'); };
       f.querySelector('.reset').onclick = () => { delete settings[id]; localStorage.setItem('stc.thresholds', JSON.stringify(settings)); pageSetting(); toast('Default dipulihkan'); };
     });
+  }
+  function settingConn() {
+    const c = ds.config, nt = c.ntfyTopic, st = ds.getStatus().status;
+    return `<h2 class="title">Notifikasi HP (walau aplikasi tertutup)</h2>
+      <div class="card"><p class="hint" style="margin-top:0">Alarm dikirim ke aplikasi gratis <b>ntfy</b>. Topik Anda:</p>
+        <p><code class="topic">${nt}</code></p>
+        <ol class="steps">
+          <li>Buka Play Store, cari <b>ntfy</b>, lalu pasang (gratis).</li>
+          <li>Ketuk tombol hijau di bawah, <b>atau</b> buka aplikasi ntfy → tombol <b>+</b> → ketik topik di atas → <b>Subscribe</b>.</li>
+          <li>Izinkan notifikasi. Selesai — alarm akan muncul walau STC Monitor ditutup.</li>
+        </ol>
+        <div class="row"><a class="btn green" href="ntfy://ntfy.sh/${nt}">📲 Buka di aplikasi ntfy</a>
+          <a class="btn" href="https://ntfy.sh/${nt}" target="_blank" rel="noopener">🌐 Lihat di web</a></div>
+        <div class="row"><button class="btn" id="copyTopic">📋 Salin topik</button></div>
+      </div>
+      <h2 class="title">Sumber data</h2>
+      <form class="card set" id="srcForm">
+        <label><span><input type="radio" name="src" value="auto" ${ds.source !== 'sim' ? 'checked' : ''} style="width:auto"> Otomatis: data perangkat (jika ada), jika belum ada pakai simulasi</span></label>
+        <label><span><input type="radio" name="src" value="sim" ${ds.source === 'sim' ? 'checked' : ''} style="width:auto"> Simulasi saja (latihan)</span></label>
+        <p class="hint">Status sekarang: <b>${(MODE_TXT[st] || MODE_TXT.simulasi)[0]}</b></p>
+        <details><summary class="hint">Pengaturan lanjutan (untuk teknisi)</summary>
+          <label>Broker (wss)<input name="url" value="${c.url}" style="width:60%"></label>
+          <label>Username<input name="username" value="${c.username}" style="width:60%"></label>
+          <label>Password<input name="password" value="${c.password}" style="width:60%"></label>
+          <label>Topik awal<input name="prefix" value="${c.prefix}" style="width:60%"></label>
+          <label>Topik ntfy<input name="ntfyTopic" value="${c.ntfyTopic}" style="width:60%"></label>
+        </details>
+        <div class="row"><button class="btn blue">Simpan &amp; muat ulang</button><button type="button" class="btn reset">Default</button></div>
+      </form>
+      <p class="hint">Versi tahap 2.</p>`;
+  }
+  function bindConn() {
+    $('#copyTopic').onclick = () => navigator.clipboard && navigator.clipboard.writeText(ds.config.ntfyTopic).then(() => toast('Topik disalin ✅'));
+    const f = $('#srcForm');
+    f.onsubmit = e => { e.preventDefault();
+      localStorage.setItem('stc.source', f.elements.src.value);
+      const m = {}; ['url', 'username', 'password', 'prefix', 'ntfyTopic'].forEach(k => m[k] = f.elements[k].value.trim());
+      localStorage.setItem('stc.mqtt', JSON.stringify(m)); location.reload(); };
+    f.querySelector('.reset').onclick = () => { localStorage.removeItem('stc.mqtt'); localStorage.removeItem('stc.source'); location.reload(); };
   }
   function toast(m) { const t = document.createElement('div'); t.className = 'toast'; t.textContent = m; document.body.appendChild(t); setTimeout(() => t.remove(), 1800); }
 

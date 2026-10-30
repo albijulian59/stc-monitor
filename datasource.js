@@ -1,10 +1,12 @@
 /* ===================================================================
  * dataSource — lapisan data STC Monitor
  * -------------------------------------------------------------------
- * Tahap 1: SIMULATOR (data palsu). Tahap berikut: ganti dengan
- * backend asli (MQTT over WebSocket / HTTP) yang memakai antarmuka SAMA:
+ * Tahap 2: data asli via MQTT over WebSocket (wss). Selama belum ada
+ * data dari perangkat (atau jika dipilih), memakai SIMULATOR di browser.
+ * Antarmuka:
  *
  *   dataSource.mode                      -> 'simulasi' | 'live'
+ *   dataSource.onStatus(cb)              -> cb('simulasi'|'connecting'|'live'|'offline'|'error')
  *   dataSource.start(opts)               -> mulai (opts.getThresholds(id))
  *   dataSource.getPumps()                -> [{id,name,type}]
  *   dataSource.getLatest(id)             -> reading terakhir
@@ -95,20 +97,89 @@
     return { pumpId: p.id, type };
   }
 
-  window.dataSource = {
+  /* ---------------- Koneksi perangkat (MQTT over WSS) ----------------
+   * Topik (lihat README):  <prefix>/<pumpId>/telemetry  -> JSON reading
+   *                        <prefix>/status               -> "online"/"offline"
+   *                        <prefix>/cmd/simulate         -> perintah uji (hanya simulator)
+   */
+  const MQTT_DEFAULTS = {
+    url: 'wss://public.cloud.shiftr.io', username: 'public', password: 'public',
+    prefix: 'stc-monitor/8a50f39eb100', ntfyTopic: 'stc-alarm-0a25f56fa0fa',
+  };
+  const cfg = Object.assign({}, MQTT_DEFAULTS, JSON.parse(localStorage.getItem('stc.mqtt') || '{}'));
+  const source = localStorage.getItem('stc.source') || 'auto';   // 'auto' | 'sim'
+  const OFFLINE_MS = 30000;
+  const statusCbs = [];
+  let simTimer = null, client = null, lastLive = 0, liveStarted = false, status = source === 'sim' ? 'simulasi' : 'connecting';
+  const setStatus = st => { if (st === status) return; status = st; ds.mode = st === 'simulasi' || st === 'connecting' ? 'simulasi' : 'live'; statusCbs.forEach(cb => cb(st, lastLive)); };
+  const num = v => (v === undefined || v === null || v === '' ? 0 : +v || 0);
+  const bool = v => v === true || v === 1 || v === '1' || v === 'true' || v === 'ON';
+
+  // Ubah payload JSON (dari RUT241 / simulator) menjadi "reading" standar
+  function normalize(pumpId, j) {
+    let ts = num(j.ts) || Date.now(); if (ts < 1e12) ts *= 1000;     // detik -> ms
+    const st = j.status !== undefined ? num(j.status) : null;        // opsional: bitmask register status
+    return {
+      pumpId, ts,
+      running: st !== null ? !!(st & 1) : bool(j.running),
+      trip: st !== null ? !!(st & 2) : bool(j.trip),
+      dryRun: st !== null ? !!(st & 4) : bool(j.dryRun),
+      pressure: num(j.pressure), currentR: num(j.currentR), currentS: num(j.currentS), currentT: num(j.currentT),
+      voltage: num(j.voltage), motorTemp: num(j.motorTemp), runHours: num(j.runHours),
+    };
+  }
+
+  function onLive(pumpId, r) {
+    if (!liveStarted) {                            // data asli pertama: hentikan simulasi, buang data palsu
+      liveStarted = true; clearInterval(simTimer); simTimer = null;
+      PUMPS.forEach(p => { history[p.id] = []; });
+    }
+    lastLive = Date.now(); push(r); setStatus('live');
+    listeners.forEach(cb => cb(r));
+  }
+
+  function connectMqtt() {
+    const s = document.createElement('script');
+    s.src = 'https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js';
+    s.onerror = () => setStatus('error');
+    s.onload = () => {
+      client = window.mqtt.connect(cfg.url, {
+        username: cfg.username || undefined, password: cfg.password || undefined,
+        clientId: 'stc-app-' + Math.random().toString(16).slice(2, 10), reconnectPeriod: 5000, connectTimeout: 10000,
+      });
+      client.on('connect', () => client.subscribe(cfg.prefix + '/+/telemetry'));
+      client.on('message', (topic, msg) => {
+        const id = topic.slice(cfg.prefix.length + 1).split('/')[0];
+        if (!history[id]) return;                  // pompa tidak dikenal
+        try { onLive(id, normalize(id, JSON.parse(msg.toString()))); } catch (e) { console.warn('payload salah', topic, e); }
+      });
+    };
+    document.head.appendChild(s);
+    setInterval(() => { if (status === 'live' && Date.now() - lastLive > OFFLINE_MS) setStatus('offline'); }, 5000);
+  }
+
+  const ds = window.dataSource = {
     mode: 'simulasi',
+    config: cfg, defaults: MQTT_DEFAULTS, source,
+    getStatus: () => ({ status, lastLive }),
+    onStatus(cb) { statusCbs.push(cb); },
     start(opts = {}) {
       if (opts.getThresholds) getThr = opts.getThresholds;
-      // isi riwayat 10 menit terakhir supaya grafik langsung terisi
+      // isi riwayat 10 menit terakhir supaya grafik langsung terisi (simulasi)
       const now = Date.now();
       for (let ts = now - HISTORY_MS; ts < now; ts += TICK_MS) PUMPS.forEach(p => push(makeReading(p, ts)));
-      tick(); setInterval(tick, TICK_MS);
+      tick(); simTimer = setInterval(tick, TICK_MS);
+      if (source !== 'sim') connectMqtt();
     },
     getPumps: () => PUMPS.map(({ id, name, type }) => ({ id, name, type })),
-    getLatest: id => history[id][history[id].length - 1],
-    getHistory: id => history[id].slice(),
+    getLatest: id => history[id][history[id].length - 1] || makeReading(PUMPS.find(p => p.id === id), Date.now()),
+    getHistory: id => history[id].length ? history[id].slice() : [ds.getLatest(id)],
     onData(cb) { listeners.push(cb); },
     simulateFault(id, type) {
+      if (status === 'live' || status === 'offline') {   // minta simulator perangkat membuat gangguan (diabaikan RUT241 asli)
+        if (client) client.publish(cfg.prefix + '/cmd/simulate', JSON.stringify({ pumpId: id || null, type: type || null }));
+        return { remote: true };
+      }
       id = id || PUMPS[Math.floor(Math.random() * PUMPS.length)].id;
       const res = startFault(id, type); tick(); return res;
     },
